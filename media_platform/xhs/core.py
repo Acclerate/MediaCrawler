@@ -194,9 +194,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
 
-                    # Sleep after each page navigation
-                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+                    # Sleep after each page navigation（随机抖动，去掉等间隔特征）
+                    page_sleep = random.uniform(config.CRAWLER_MAX_SLEEP_SEC, config.CRAWLER_MAX_SLEEP_SEC * 2.5)
+                    await asyncio.sleep(page_sleep)
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {page_sleep:.1f} seconds after page {page-1}")
                 except DataFetchError:
                     utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
                     break
@@ -230,8 +231,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 )
                 continue
 
-            # Use fixed crawling interval
-            crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
+            # 随机抖动间隔，去掉等间隔特征
+            crawl_interval = random.uniform(config.CRAWLER_MAX_SLEEP_SEC, config.CRAWLER_MAX_SLEEP_SEC * 2.5)
             # Get all note information of the creator
             all_notes_list = await self.xhs_client.get_all_notes_by_creator(
                 user_id=user_id,
@@ -322,17 +323,17 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     pass
 
                 if not note_detail:
-                    note_detail = await self.xhs_client.get_note_by_id_from_html(note_id, xsec_source, xsec_token,
-                                                                                 enable_cookie=True)
+                    note_detail = await self.xhs_client.get_note_by_id_from_html(note_id, xsec_source, xsec_token,enable_cookie=True)
                     if not note_detail:
                         utils.logger.warning(f"[skip] Failed to get note detail, Id: {note_id}, 跳过继续")
                         return None
 
                 note_detail.update({"xsec_token": xsec_token, "xsec_source": xsec_source})
 
-                # Sleep after fetching note detail
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note {note_id}")
+                # Sleep after fetching note detail（随机抖动，去掉等间隔特征）
+                detail_sleep = random.uniform(config.CRAWLER_MAX_SLEEP_SEC, config.CRAWLER_MAX_SLEEP_SEC * 2.5)
+                await asyncio.sleep(detail_sleep)
+                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {detail_sleep:.1f} seconds after fetching note {note_id}")
 
                 return note_detail
 
@@ -375,8 +376,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """Get note comments with keyword filtering and quantity limitation"""
         async with semaphore:
             utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
-            # Use fixed crawling interval
-            crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
+            # 随机抖动间隔，去掉等间隔特征
+            crawl_interval = random.uniform(config.CRAWLER_MAX_SLEEP_SEC, config.CRAWLER_MAX_SLEEP_SEC * 2.5)
             await self.xhs_client.get_note_all_comments(
                 note_id=note_id,
                 xsec_token=xsec_token,

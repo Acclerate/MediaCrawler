@@ -84,6 +84,7 @@ async def update_xhs_note(note_item: Dict):
         "user_id": user_info.get("user_id"),  # 创作者原始 user_id（本地研究用，勿对外传播）
         "author_homepage": f"https://www.xiaohongshu.com/user/profile/{user_info.get('user_id')}",  # 号主主页链接
         "nickname": user_info.get("nickname"),  # 用户昵称（原始，未脱敏）
+        "ip_location": note_item.get("ip_location", ""),  # 笔记发布时 IP 属地（省级）
         "liked_count": interact_info.get("liked_count"),  # Like count
         "collected_count": interact_info.get("collected_count"),  # Collection count
         "comment_count": interact_info.get("comment_count"),  # Comment count
@@ -138,6 +139,7 @@ async def update_xhs_note_comment(note_id: str, comment_item: Dict):
         "user_id": user_info.get("user_id"),  # 创作者原始 user_id（本地研究用，勿对外传播）
         "author_homepage": f"https://www.xiaohongshu.com/user/profile/{user_info.get('user_id')}",  # 号主主页链接
         "nickname": user_info.get("nickname"),  # 用户昵称（原始，未脱敏）
+        "ip_location": comment_item.get("ip_location", ""),  # 评论发布时 IP 属地（省级）
         "sub_comment_count": comment_item.get("sub_comment_count", 0),  # Sub-comment count
         "pictures": ",".join(comment_pictures),  # Comment pictures
         "parent_comment_id": target_comment.get("id", ""),  # Parent comment ID

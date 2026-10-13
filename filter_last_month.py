@@ -48,7 +48,9 @@ for nid in order:
     else:
         dropped += 1
 
-dst = src.with_name(src.stem + f"_last{DAYS}d.jsonl")
+    # 输出按 日期_时分 命名（时间插在 lastNd 后缀前，保持 *_lastNd.jsonl 约定），避免同日覆盖
+    hhmm = datetime.now().strftime("%H%M")
+    dst = src.with_name(f"{src.stem}_{hhmm}_last{DAYS}d.jsonl")
 with open(dst, "w", encoding="utf-8") as f:
     for rec in kept:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")

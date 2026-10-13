@@ -184,3 +184,6 @@ debug_tools
 
 database/*.db
 .omx/
+
+# 个人脚本运行时产生的缓存（含真实用户ID，勿提交）
+/gender_cache.json

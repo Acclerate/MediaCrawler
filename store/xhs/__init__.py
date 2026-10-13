@@ -81,7 +81,9 @@ async def update_xhs_note(note_item: Dict):
         "time": note_item.get("time"),  # Note publish time
         "last_update_time": note_item.get("last_update_time", 0),  # Note last update time
         "creator_hash": anonymize_user_id(user_info.get("user_id")),  # 创作者匿名哈希(不存原始 user_id)
-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
+        "user_id": user_info.get("user_id"),  # 创作者原始 user_id（本地研究用，勿对外传播）
+        "author_homepage": f"https://www.xiaohongshu.com/user/profile/{user_info.get('user_id')}",  # 号主主页链接
+        "nickname": user_info.get("nickname"),  # 用户昵称（原始，未脱敏）
         "liked_count": interact_info.get("liked_count"),  # Like count
         "collected_count": interact_info.get("collected_count"),  # Collection count
         "comment_count": interact_info.get("comment_count"),  # Comment count
@@ -133,7 +135,9 @@ async def update_xhs_note_comment(note_id: str, comment_item: Dict):
         "note_id": note_id,  # Note ID
         "content": comment_item.get("content"),  # Comment content
         "creator_hash": anonymize_user_id(user_info.get("user_id")),  # 创作者匿名哈希(不存原始 user_id)
-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
+        "user_id": user_info.get("user_id"),  # 创作者原始 user_id（本地研究用，勿对外传播）
+        "author_homepage": f"https://www.xiaohongshu.com/user/profile/{user_info.get('user_id')}",  # 号主主页链接
+        "nickname": user_info.get("nickname"),  # 用户昵称（原始，未脱敏）
         "sub_comment_count": comment_item.get("sub_comment_count", 0),  # Sub-comment count
         "pictures": ",".join(comment_pictures),  # Comment pictures
         "parent_comment_id": target_comment.get("id", ""),  # Parent comment ID

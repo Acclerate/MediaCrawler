@@ -65,7 +65,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
         self.index_url = "https://www.rednote.com" if config.XHS_INTERNATIONAL else "https://www.xiaohongshu.com"
         self.cookie_urls = [self.index_url]
         # self.user_agent = utils.get_user_agent()
-        self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        # 默认值仅作占位，start() 中会用浏览器真实 UA 覆盖，避免指纹矛盾
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
         self._media_downloader: Optional[MediaDownloader] = None
@@ -97,11 +98,18 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     self.user_agent,
                     headless=config.HEADLESS,
                 )
-                # stealth.min.js is a js script to prevent the website from detecting the crawler.
-                await self.browser_context.add_init_script(path="libs/stealth.min.js")
+
+            # stealth.min.js is a js script to prevent the website from detecting the crawler.
+            # 持久化/CDP 两种上下文都需要注入，否则 navigator.webdriver 等自动化痕迹会暴露
+            await self.browser_context.add_init_script(path="libs/stealth.min.js")
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.goto(self.index_url)
+
+            # 用浏览器真实 UA 覆盖默认值，保证 API 客户端与浏览器指纹一致
+            real_ua = await self.context_page.evaluate("navigator.userAgent")
+            if real_ua:
+                self.user_agent = real_ua
 
             # Create a client to interact with the Xiaohongshu website.
             self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
@@ -405,7 +413,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-site",
-                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+                "user-agent": self.user_agent,  # 与浏览器真实 UA 保持一致，避免指纹矛盾
                 "Cookie": cookie_str,
             },
             playwright_page=self.context_page,
@@ -436,7 +444,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     "width": 1920,
                     "height": 1080
                 },
-                user_agent=user_agent,
+                # 不覆盖 user_agent：让浏览器使用与自身版本一致的原生 UA，
+                # 覆盖会造成 UA 与浏览器指纹矛盾，容易被风控识别并撤销登录态
             )
             return browser_context
         else:

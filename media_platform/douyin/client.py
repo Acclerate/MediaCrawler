@@ -116,7 +116,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             "platform": "PC",
             "screen_width": "2560",
             "screen_height": "1440",
-            'effective_type': '4g',
+            "effective_type": "4g",
             "round_trip_time": "50",
             "webid": get_web_id(),
             "msToken": local_storage.get("xmst"),
@@ -130,7 +130,13 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             post_data = params
 
         if "/v1/web/general/search" not in uri:
-            a_bogus = await get_a_bogus(uri, query_string, post_data, headers["User-Agent"], self.playwright_page)
+            a_bogus = await get_a_bogus(
+                uri,
+                query_string,
+                post_data,
+                headers["User-Agent"],
+                self.playwright_page,
+            )
             params["a_bogus"] = a_bogus
 
     async def request(self, method, url, **kwargs):
@@ -141,24 +147,32 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             response = await client.request(method, url, timeout=self.timeout, **kwargs)
         try:
             if response.text == "" or response.text == "blocked":
-                utils.logger.error(f"request params incrr, response.text: {response.text}")
+                utils.logger.error(
+                    f"request params incrr, response.text: {response.text}"
+                )
                 raise Exception("account blocked")
             return response.json()
         except Exception as e:
             raise DataFetchError(f"{e}, {response.text}")
 
-    async def get(self, uri: str, params: Optional[Dict] = None, headers: Optional[Dict] = None):
+    async def get(
+        self, uri: str, params: Optional[Dict] = None, headers: Optional[Dict] = None
+    ):
         """
         GET请求
         """
         await self.__process_req_params(uri, params, headers)
         headers = headers or self.headers
-        return await self.request(method="GET", url=f"{self._host}{uri}", params=params, headers=headers)
+        return await self.request(
+            method="GET", url=f"{self._host}{uri}", params=params, headers=headers
+        )
 
     async def post(self, uri: str, data: dict, headers: Optional[Dict] = None):
         await self.__process_req_params(uri, data, headers)
         headers = headers or self.headers
-        return await self.request(method="POST", url=f"{self._host}{uri}", data=data, headers=headers)
+        return await self.request(
+            method="POST", url=f"{self._host}{uri}", data=data, headers=headers
+        )
 
     async def pong(self, browser_context: BrowserContext) -> bool:
         local_storage = await self.playwright_page.evaluate("() => window.localStorage")
@@ -171,7 +185,9 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         )
         return cookie_dict.get("LOGIN_STATUS") == "1"
 
-    async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
+    async def update_cookies(
+        self, browser_context: BrowserContext, urls: Optional[list[str]] = None
+    ):
         cookie_str, cookie_dict = await utils.convert_browser_context_cookies(
             browser_context,
             urls=urls or self.cookie_urls,
@@ -199,27 +215,37 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         :return:
         """
         query_params = {
-            'search_channel': search_channel.value,
-            'enable_history': '1',
-            'keyword': keyword,
-            'search_source': 'tab_search',
-            'query_correct_type': '1',
-            'is_filter_search': '0',
-            'from_group_id': '7378810571505847586',
-            'offset': offset,
-            'count': '15',
-            'need_filter_settings': '1',
-            'list_type': 'multi',
-            'search_id': search_id,
+            "search_channel": search_channel.value,
+            "enable_history": "1",
+            "keyword": keyword,
+            "search_source": "tab_search",
+            "query_correct_type": "1",
+            "is_filter_search": "0",
+            "from_group_id": "7378810571505847586",
+            "offset": offset,
+            "count": "15",
+            "need_filter_settings": "1",
+            "list_type": "multi",
+            "search_id": search_id,
         }
-        if sort_type.value != SearchSortType.GENERAL.value or publish_time.value != PublishTimeType.UNLIMITED.value:
-            query_params["filter_selected"] = json.dumps({"sort_type": str(sort_type.value), "publish_time": str(publish_time.value)})
+        if (
+            sort_type.value != SearchSortType.GENERAL.value
+            or publish_time.value != PublishTimeType.UNLIMITED.value
+        ):
+            query_params["filter_selected"] = json.dumps(
+                {
+                    "sort_type": str(sort_type.value),
+                    "publish_time": str(publish_time.value),
+                }
+            )
             query_params["is_filter_search"] = 1
             query_params["search_source"] = "tab_search"
         referer_url = f"https://www.douyin.com/search/{keyword}?aid=f594bbd9-a0e2-4651-9319-ebe3cb6298c1&type=general"
         headers = copy.copy(self.headers)
-        headers["Referer"] = urllib.parse.quote(referer_url, safe=':/')
-        return await self.get("/aweme/v1/web/general/search/single/", query_params, headers=headers)
+        headers["Referer"] = urllib.parse.quote(referer_url, safe=":/")
+        return await self.get(
+            "/aweme/v1/web/general/search/single/", query_params, headers=headers
+        )
 
     async def get_video_by_id(self, aweme_id: str) -> Any:
         """
@@ -236,7 +262,8 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         s_v_web_id = self.cookie_dict.get("s_v_web_id", "")
         params = {
             "aweme_id": aweme_id,
-            "uifid": self.cookie_dict.get("UIFID") or self.cookie_dict.get("UIFID_TEMP", ""),
+            "uifid": self.cookie_dict.get("UIFID")
+            or self.cookie_dict.get("UIFID_TEMP", ""),
             "verifyFp": s_v_web_id,
             "fp": s_v_web_id,
         }
@@ -246,33 +273,39 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         return res.get("aweme_detail", {})
 
     async def get_aweme_comments(self, aweme_id: str, cursor: int = 0):
-        """get note comments
-
-        """
+        """get note comments"""
         uri = "/aweme/v1/web/comment/list/"
         params = {"aweme_id": aweme_id, "cursor": cursor, "count": 20, "item_type": 0}
         keywords = request_keyword_var.get()
-        referer_url = "https://www.douyin.com/search/" + keywords + '?aid=3a3cec5a-9e27-4040-b6aa-ef548c2c1138&publish_time=0&sort_type=0&source=search_history&type=general'
+        referer_url = (
+            "https://www.douyin.com/search/"
+            + keywords
+            + "?aid=3a3cec5a-9e27-4040-b6aa-ef548c2c1138&publish_time=0&sort_type=0&source=search_history&type=general"
+        )
         headers = copy.copy(self.headers)
-        headers["Referer"] = urllib.parse.quote(referer_url, safe=':/')
+        headers["Referer"] = urllib.parse.quote(referer_url, safe=":/")
         return await self.get(uri, params)
 
     async def get_sub_comments(self, aweme_id: str, comment_id: str, cursor: int = 0):
         """
-            获取子评论
+        获取子评论
         """
         uri = "/aweme/v1/web/comment/list/reply/"
         params = {
-            'comment_id': comment_id,
+            "comment_id": comment_id,
             "cursor": cursor,
             "count": 20,
             "item_type": 0,
             "item_id": aweme_id,
         }
         keywords = request_keyword_var.get()
-        referer_url = "https://www.douyin.com/search/" + keywords + '?aid=3a3cec5a-9e27-4040-b6aa-ef548c2c1138&publish_time=0&sort_type=0&source=search_history&type=general'
+        referer_url = (
+            "https://www.douyin.com/search/"
+            + keywords
+            + "?aid=3a3cec5a-9e27-4040-b6aa-ef548c2c1138&publish_time=0&sort_type=0&source=search_history&type=general"
+        )
         headers = copy.copy(self.headers)
-        headers["Referer"] = urllib.parse.quote(referer_url, safe=':/')
+        headers["Referer"] = urllib.parse.quote(referer_url, safe=":/")
         return await self.get(uri, params)
 
     async def get_aweme_all_comments(
@@ -289,7 +322,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         :param crawl_interval: 抓取间隔
         :param is_fetch_sub_comments: 是否抓取子评论
         :param callback: 回调函数，用于处理抓取到的评论
-        :param max_count: 一次帖子爬取的最大评论数量
+        :param max_count: 一次帖子爬取的最大评论数量（顶层评论 + 子评论的总上限）
         :return: 评论列表
         """
         result = []
@@ -301,11 +334,20 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             comments_cursor = comments_res.get("cursor", 0)
             comments = comments_res.get("comments", [])
             if not comments:
-                continue
+                # has_more=1 但本页为空时，继续循环只会用同一个 cursor 无限重试，
+                # 这里直接熔断退出（has_more=0 的空页本来也会自然退出，行为不变）
+                if comments_has_more:
+                    utils.logger.warning(
+                        f"[DouYinClient.get_aweme_all_comments] aweme_id:{aweme_id} "
+                        "got empty comments page but has_more=1, stop fetching to avoid infinite loop"
+                    )
+                break
             if len(result) + len(comments) > max_count:
-                comments = comments[:max_count - len(result)]
+                comments = comments[: max_count - len(result)]
             result.extend(comments)
-            if callback:  # If there is a callback function, execute the callback function
+            if (
+                callback
+            ):  # If there is a callback function, execute the callback function
                 await callback(aweme_id, comments)
 
             await asyncio.sleep(crawl_interval)
@@ -313,6 +355,8 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                 continue
             # Get secondary reviews
             for comment in comments:
+                if len(result) >= max_count:
+                    break
                 reply_comment_total = comment.get("reply_comment_total")
 
                 if reply_comment_total > 0:
@@ -321,17 +365,32 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                     sub_comments_cursor = 0
 
                     while sub_comments_has_more:
-                        sub_comments_res = await self.get_sub_comments(aweme_id, comment_id, sub_comments_cursor)
+                        sub_comments_res = await self.get_sub_comments(
+                            aweme_id, comment_id, sub_comments_cursor
+                        )
                         sub_comments_has_more = sub_comments_res.get("has_more", 0)
                         sub_comments_cursor = sub_comments_res.get("cursor", 0)
                         sub_comments = sub_comments_res.get("comments", [])
 
                         if not sub_comments:
-                            continue
+                            # 同主评论：has_more=1 但空页时熔断，避免无限重试
+                            if sub_comments_has_more:
+                                utils.logger.warning(
+                                    f"[DouYinClient.get_aweme_all_comments] aweme_id:{aweme_id} "
+                                    f"comment_id:{comment_id} got empty sub comments page but has_more=1, "
+                                    "stop fetching to avoid infinite loop"
+                                )
+                            break
+                        if len(result) + len(sub_comments) > max_count:
+                            sub_comments = sub_comments[: max_count - len(result)]
                         result.extend(sub_comments)
-                        if callback:  # If there is a callback function, execute the callback function
+                        if (
+                            callback
+                        ):  # If there is a callback function, execute the callback function
                             await callback(aweme_id, sub_comments)
                         await asyncio.sleep(crawl_interval)
+                        if len(result) >= max_count:
+                            break
         return result
 
     async def get_user_info(self, sec_user_id: str):
@@ -343,7 +402,9 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         }
         return await self.get(uri, params)
 
-    async def get_user_aweme_posts(self, sec_user_id: str, max_cursor: str = "") -> Dict:
+    async def get_user_aweme_posts(
+        self, sec_user_id: str, max_cursor: str = ""
+    ) -> Dict:
         uri = "/aweme/v1/web/aweme/post/"
         params = {
             "sec_user_id": sec_user_id,
@@ -354,7 +415,12 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         }
         return await self.get(uri, params)
 
-    async def get_all_user_aweme_posts(self, sec_user_id: str, callback: Optional[Callable] = None):
+    async def get_all_user_aweme_posts(
+        self,
+        sec_user_id: str,
+        callback: Optional[Callable] = None,
+        crawl_interval: float = 1.0,
+    ):
         posts_has_more = 1
         max_cursor = ""
         result = []
@@ -362,11 +428,21 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             aweme_post_res = await self.get_user_aweme_posts(sec_user_id, max_cursor)
             posts_has_more = aweme_post_res.get("has_more", 0)
             max_cursor = aweme_post_res.get("max_cursor")
-            aweme_list = aweme_post_res.get("aweme_list") if aweme_post_res.get("aweme_list") else []
-            utils.logger.info(f"[DouYinClient.get_all_user_aweme_posts] get sec_user_id:{sec_user_id} video len : {len(aweme_list)}")
+            aweme_list = (
+                aweme_post_res.get("aweme_list")
+                if aweme_post_res.get("aweme_list")
+                else []
+            )
+            utils.logger.info(
+                f"[DouYinClient.get_all_user_aweme_posts] get sec_user_id:{sec_user_id} video len : {len(aweme_list)}"
+            )
             if callback:
                 await callback(aweme_list)
             result.extend(aweme_list)
+            if posts_has_more == 1:
+                # 翻页之间限速，与 search / 评论路径的节流保持一致，
+                # 避免连续轰击 /aweme/v1/web/aweme/post/ 触发风控
+                await asyncio.sleep(crawl_interval)
         return result
 
     async def resolve_short_url(self, short_url: str) -> str:
@@ -377,19 +453,29 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         Returns:
             重定向后的完整URL
         """
-        async with make_async_client(proxy=self.proxy, follow_redirects=False) as client:
+        async with make_async_client(
+            proxy=self.proxy, follow_redirects=False
+        ) as client:
             try:
-                utils.logger.info(f"[DouYinClient.resolve_short_url] Resolving short URL: {short_url}")
+                utils.logger.info(
+                    f"[DouYinClient.resolve_short_url] Resolving short URL: {short_url}"
+                )
                 response = await client.get(short_url, timeout=10)
 
                 # Short links usually return a 302 redirect
                 if response.status_code in [301, 302, 303, 307, 308]:
                     redirect_url = response.headers.get("Location", "")
-                    utils.logger.info(f"[DouYinClient.resolve_short_url] Resolved to: {redirect_url}")
+                    utils.logger.info(
+                        f"[DouYinClient.resolve_short_url] Resolved to: {redirect_url}"
+                    )
                     return redirect_url
                 else:
-                    utils.logger.warning(f"[DouYinClient.resolve_short_url] Unexpected status code: {response.status_code}")
+                    utils.logger.warning(
+                        f"[DouYinClient.resolve_short_url] Unexpected status code: {response.status_code}"
+                    )
                     return ""
             except Exception as e:
-                utils.logger.error(f"[DouYinClient.resolve_short_url] Failed to resolve short URL: {e}")
+                utils.logger.error(
+                    f"[DouYinClient.resolve_short_url] Failed to resolve short URL: {e}"
+                )
                 return ""

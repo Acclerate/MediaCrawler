@@ -34,7 +34,8 @@ from playwright.async_api import Page
 from model.m_douyin import VideoUrlInfo, CreatorUrlInfo
 from tools.crawler_util import extract_url_params_to_dict
 
-douyin_sign_obj = execjs.compile(open('libs/douyin.js', encoding='utf-8-sig').read())
+douyin_sign_obj = execjs.compile(open("libs/douyin.js", encoding="utf-8-sig").read())
+
 
 def get_web_id():
     """
@@ -47,22 +48,32 @@ def get_web_id():
         if t is not None:
             return str(t ^ (int(16 * random.random()) >> (t // 4)))
         else:
-            return ''.join(
-                [str(int(1e7)), '-', str(int(1e3)), '-', str(int(4e3)), '-', str(int(8e3)), '-', str(int(1e11))]
+            return "".join(
+                [
+                    str(int(1e7)),
+                    "-",
+                    str(int(1e3)),
+                    "-",
+                    str(int(4e3)),
+                    "-",
+                    str(int(8e3)),
+                    "-",
+                    str(int(1e11)),
+                ]
             )
 
-    web_id = ''.join(
-        e(int(x)) if x in '018' else x for x in e(None)
-    )
-    return web_id.replace('-', '')[:19]
+    web_id = "".join(e(int(x)) if x in "018" else x for x in e(None))
+    return web_id.replace("-", "")[:19]
 
 
-
-async def get_a_bogus(url: str, params: str, post_data: dict, user_agent: str, page: Page = None):
+async def get_a_bogus(
+    url: str, params: str, post_data: dict, user_agent: str, page: Page = None
+):
     """
     Get a_bogus parameter, currently does not support POST request type signature
     """
     return get_a_bogus_from_js(url, params, user_agent)
+
 
 def get_a_bogus_from_js(url: str, params: str, user_agent: str):
     """
@@ -81,8 +92,9 @@ def get_a_bogus_from_js(url: str, params: str, user_agent: str):
     return douyin_sign_obj.call(sign_js_name, params, user_agent)
 
 
-
-async def get_a_bogus_from_playwright(params: str, post_data: dict, user_agent: str, page: Page):
+async def get_a_bogus_from_playwright(
+    params: str, post_data: dict, user_agent: str, page: Page
+):
     """
     Get a_bogus parameter through playwright
     playwright version is deprecated
@@ -93,9 +105,32 @@ async def get_a_bogus_from_playwright(params: str, post_data: dict, user_agent: 
         post_data = ""
     a_bogus = await page.evaluate(
         "([params, post_data, ua]) => window.bdms.init._v[2].p[42].apply(null, [0, 1, 8, params, post_data, ua])",
-        [params, post_data, user_agent])
+        [params, post_data, user_agent],
+    )
 
     return a_bogus
+
+
+def parse_aweme_info_from_search_item(post_item: dict) -> Optional[dict]:
+    """从搜索结果单条数据中提取作品详情。
+
+    常规结果是 ``aweme_info``；合集/图集类结果是 ``aweme_mix_info.mix_items`` 的
+    第一项。接口可能返回 ``aweme_mix_info: null`` 或 ``mix_items: []``，这些脏数据
+    统一返回 None 由调用方跳过，不让单条异常击穿整个 search 流程。
+
+    Args:
+        post_item: 搜索响应 data 数组里的一条
+
+    Returns:
+        作品详情 dict，无法提取时为 None
+    """
+    aweme_info = post_item.get("aweme_info")
+    if aweme_info:
+        return aweme_info
+    try:
+        return post_item.get("aweme_mix_info", {}).get("mix_items")[0]
+    except (TypeError, AttributeError, IndexError):
+        return None
 
 
 def parse_video_info_from_url(url: str) -> VideoUrlInfo:
@@ -119,7 +154,12 @@ def parse_video_info_from_url(url: str) -> VideoUrlInfo:
         return VideoUrlInfo(aweme_id=url, url_type="normal")
 
     # Check if it's a short link (v.douyin.com)
-    if "v.douyin.com" in url or url.startswith("http") and len(url) < 50 and "video" not in url:
+    if (
+        "v.douyin.com" in url
+        or url.startswith("http")
+        and len(url) < 50
+        and "video" not in url
+    ):
         return VideoUrlInfo(aweme_id="", url_type="short")  # Requires client parsing
 
     # Try to extract modal_id from URL parameters
@@ -129,7 +169,7 @@ def parse_video_info_from_url(url: str) -> VideoUrlInfo:
         return VideoUrlInfo(aweme_id=modal_id, url_type="modal")
 
     # Extract ID from standard video URL: /video/number
-    video_pattern = r'/video/(\d+)'
+    video_pattern = r"/video/(\d+)"
     match = re.search(video_pattern, url)
     if match:
         aweme_id = match.group(1)
@@ -151,11 +191,13 @@ def parse_creator_info_from_url(url: str) -> CreatorUrlInfo:
         CreatorUrlInfo: Object containing creator ID
     """
     # If it's a pure ID format (usually starts with MS4wLjABAAAA), return directly
-    if url.startswith("MS4wLjABAAAA") or (not url.startswith("http") and "douyin.com" not in url):
+    if url.startswith("MS4wLjABAAAA") or (
+        not url.startswith("http") and "douyin.com" not in url
+    ):
         return CreatorUrlInfo(sec_user_id=url)
 
     # Extract sec_user_id from creator homepage URL: /user/xxx
-    user_pattern = r'/user/([^/?]+)'
+    user_pattern = r"/user/([^/?]+)"
     match = re.search(user_pattern, url)
     if match:
         sec_user_id = match.group(1)
@@ -164,7 +206,7 @@ def parse_creator_info_from_url(url: str) -> CreatorUrlInfo:
     raise ValueError(f"Unable to parse creator ID from URL: {url}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Test video URL parsing
     print("=== Video URL Parsing Test ===")
     test_urls = [

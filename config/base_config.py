@@ -99,7 +99,7 @@ USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
 START_PAGE = 1
 
 # Control the number of crawled videos/posts
-CRAWLER_MAX_NOTES_COUNT = 20
+CRAWLER_MAX_NOTES_COUNT = 10  # §13 降密恢复：每词 20→10（2026-10-16）
 
 # Controlling the number of concurrent crawlers
 MAX_CONCURRENCY_NUM = 1

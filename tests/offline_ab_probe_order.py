@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """探测后置整改（R4/§13）的离线 A/B 验收：不触网、不启动浏览器，账号冷却期零风险。
 
+⚠️ 适用范围：本脚本专用于 §15「探测后置」那次整改的基线对比（断言输出逐格一致）。
+阶段二/三（2026-10-16 起）引入了有意的行为变更（探测失败→待复核、旧帖自荐扫描等），
+之后再运行本脚本断言会失效——阶段二/三的行为验证请用 tests/test_pipeline_offline.py。
+
 用法（主仓根目录执行）:
   python tests/offline_ab_probe_order.py              # 驱动模式：自动建基线 worktree，桩化跑新旧两版并对比
   python tests/offline_ab_probe_order.py --keep       # 保留 worktree 与临时目录供人工检查

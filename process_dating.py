@@ -14,6 +14,13 @@
      → Stage C 规则判决。作者批与评论者批共用一次浏览器会话（ProbeSession）。
      行为变化：已推送帖不再进入剔除/待复核统计（统一计去重）；双 IP 均不合规的
      剔除原因显示"笔记IP"（笔记侧先判）。
+  R5 探测可靠性（阶段三，2026-10-16）：探测成功才落缓存（值含 probed_at），失败不写 -1、
+     下次运行自动重探；缓存 TTL 30 天（旧 -1 条目视为待重探）；单次运行连续 3 次探测异常
+     熔断中止剩余探测；同一作者连续 3 轮失败 → 滞留保护剔除。judge_note：探测失败 →
+     待复核(将重试)而非误杀。历史种子仅 --seed 时初始化。
+  R6 自荐扫描范围（阶段二，2026-10-16）：女生自荐线索的检测独立于"帖子是否已推送"——
+     扫描全部合规帖（新增+已推+待复核）的评论；评论者仍全局只报一次，已报告/人工判男
+     的评论者不再探测。
 
 性别判定数据源：作者主页 userPageData.basicInfo.gender（1=女 2=男 0=未设置，缓存 gender_cache.json）。
 规则本体（正则表 + 纯函数 judge_note 等）在 dating_rules.py，本文件只保留流程编排。
@@ -31,6 +38,7 @@ import os
 import random
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -49,10 +57,22 @@ JSONL_DIR = Path("data/xhs/jsonl")
 OUT_DIR = Path("data/xhs")
 PROBE_MIN_SEC = 5   # 主页探测间隔下限（随机抖动，去掉等间隔特征）
 PROBE_MAX_SEC = 10  # 主页探测间隔上限
+CACHE_TTL_SEC = 30 * 86400  # 性别/IP 缓存有效期（阶段三：超期重探）
+PROBE_BREAKER_N = 3   # 单次运行连续 N 次探测异常 → 熔断中止剩余探测
+PROBE_FAIL_DROP_N = 3  # 同一作者连续 N 轮探测失败 → 滞留保护剔除（防止永久滞留待复核）
 
 
 def load_cache() -> dict:
-    return json.loads(GENDER_CACHE.read_text(encoding="utf-8")) if GENDER_CACHE.exists() else {}
+    if not GENDER_CACHE.exists():
+        return {}
+    cache = json.loads(GENDER_CACHE.read_text(encoding="utf-8"))
+    if any(isinstance(v, dict) and "probed_at" not in v for v in cache.values()):
+        # 阶段三缓存结构迁移：旧条目无 probed_at，以缓存文件 mtime 近似最后一次探测时间
+        fallback = int(GENDER_CACHE.stat().st_mtime)
+        for v in cache.values():
+            if isinstance(v, dict) and "probed_at" not in v:
+                v["probed_at"] = fallback
+    return cache
 
 
 def save_cache(cache: dict) -> None:
@@ -61,8 +81,11 @@ def save_cache(cache: dict) -> None:
 
 def load_history() -> dict:
     if HISTORY.exists():
-        return json.loads(HISTORY.read_text(encoding="utf-8"))
-    return {"note_ids": [], "commenters": {}}
+        h = json.loads(HISTORY.read_text(encoding="utf-8"))
+    else:
+        h = {"note_ids": [], "commenters": {}}
+    h.setdefault("probe_fail_count", {})  # 阶段三：{uid: 连续探测失败轮数}
+    return h
 
 
 def save_history(h: dict) -> None:
@@ -162,13 +185,20 @@ def load_comments() -> dict[str, list[dict]]:
 class ProbeSession:
     """单次浏览器会话内完成多批主页探测（作者批/评论者批共用一次 launch 与 client）。
 
-    每批内部仍缓存优先（未命中才探测），间隔 5~10s 随机抖动；两批都全命中缓存时
-    不启动浏览器。ps.probed 记录本会话实际探测过的 uid（观测/验收用）。
+    阶段三(B) 可靠性语义：
+      - 成功才落缓存（值含 probed_at）；失败/异常不写 -1，下次运行自动重探
+      - 缓存 TTL 30 天；旧 -1 条目视为待重探
+      - 单次运行连续 3 次探测异常 → 熔断，本批及后续批次全部跳过（疑似风控，避免烧 cookie）
+      - ps.probed/ps.succeeded/ps.failed 记录本会话探测明细（观测/验收/滞留保护用）
+    两批都全命中缓存时不启动浏览器。
     """
 
     def __init__(self) -> None:
         self.cache = load_cache()
         self.probed: list[str] = []
+        self.succeeded: set[str] = set()
+        self.failed: set[str] = set()
+        self.breaker_tripped = False
         self._pw = self._ctx = self._client = None
 
     async def __aenter__(self) -> "ProbeSession":
@@ -188,29 +218,50 @@ class ProbeSession:
             playwright_page=page, cookie_dict=cookie_dict)
 
     async def probe(self, user_ids: list[str]) -> dict:
-        todo = [u for u in user_ids if u and u not in self.cache]
-        print(f"性别/IP 缓存: {len(self.cache)} 已有, {len(todo)} 需探测")
+        def _stale(entry: dict) -> bool:
+            return entry.get("gender") == -1 or time.time() - entry.get("probed_at", 0) > CACHE_TTL_SEC
+
+        todo = [u for u in user_ids if u and (u not in self.cache or _stale(self.cache[u]))]
+        print(f"性别/IP 缓存: {len(self.cache)} 已有, {len(todo)} 需探测(含TTL过期/失败重探)")
         if not todo:
+            return self.cache
+        if self.breaker_tripped:  # 前一批已熔断：后续批次全部跳过，下次运行重试
+            print("  ⚠️ 熔断状态，本批探测全部跳过（下次运行自动重试）")
             return self.cache
         if self._client is None:  # 首个真实探测批次才启动浏览器
             await self._launch()
-        self.probed.extend(todo)
+        fails = 0  # 连续异常计数（熔断器）
         try:
             for i, uid in enumerate(todo, 1):
+                self.probed.append(uid)  # 记录实际发起的探测（熔断中止者不计）
+                entry = None
                 try:
                     info = await self._client.get_creator_info(uid)
                     if info and info.get("result", {}).get("success"):
                         b = info.get("basicInfo", {})
-                        self.cache[uid] = {"gender": int(b.get("gender") or 0), "ip": b.get("ipLocation", ""), "nickname": b.get("nickname", "")}
+                        entry = {"gender": int(b.get("gender") or 0), "ip": b.get("ipLocation", ""),
+                                 "nickname": b.get("nickname", ""), "probed_at": int(time.time())}
                     else:
-                        self.cache[uid] = {"gender": -1, "ip": "", "nickname": ""}
+                        print(f"  探测失败 {uid}: 接口 success=False")
                 except Exception as e:
-                    self.cache[uid] = {"gender": -1, "ip": "", "nickname": ""}
                     print(f"  探测失败 {uid}: {type(e).__name__}")
-                print(f"  [{i}/{len(todo)}] {uid} -> gender={self.cache[uid]['gender']} ip={self.cache[uid]['ip'] or '?'}")
+                if entry is None:
+                    self.failed.add(uid)
+                    fails += 1
+                    print(f"  [{i}/{len(todo)}] {uid} -> 失败(不落缓存，下次自动重探)")
+                    if fails >= PROBE_BREAKER_N:
+                        self.breaker_tripped = True
+                        print(f"  ⚠️ 连续 {fails} 次探测异常，熔断中止剩余 {len(todo) - i} 个（疑似风控，继续硬打会烧 cookie）")
+                        break
+                else:
+                    self.cache[uid] = entry
+                    self.succeeded.add(uid)
+                    self.failed.discard(uid)
+                    fails = 0
+                    print(f"  [{i}/{len(todo)}] {uid} -> gender={entry['gender']} ip={entry['ip'] or '?'}")
                 if i % 10 == 0:
                     save_cache(self.cache)
-                await asyncio.sleep(random.uniform(PROBE_MIN_SEC, PROBE_MAX_SEC))  # 5~10s 随机抖动，去掉等间隔特征
+                await asyncio.sleep(random.uniform(PROBE_MIN_SEC, PROBE_MAX_SEC))  # 5~10s 随机抖动
         finally:
             save_cache(self.cache)
         return self.cache
@@ -222,6 +273,20 @@ class ProbeSession:
         if self._pw is not None:
             await self._pw.stop()
         return False
+
+
+def apply_probe_counts(history: dict, ps: "ProbeSession") -> None:
+    """消费本会话自上次调用以来的探测增量：成功清除 fail_count、失败 +1（每次失败只计一轮）。
+
+    run_pipeline 在作者批与评论者批后各调用一次；不清空会导致同一 uid 重复累计。
+    """
+    fc = history.setdefault("probe_fail_count", {})
+    for uid in ps.succeeded:
+        fc.pop(uid, None)
+    for uid in ps.failed:
+        fc[uid] = fc.get(uid, 0) + 1
+    ps.succeeded.clear()
+    ps.failed.clear()
 
 
 def prefilter(notes: list[dict], seen_notes: set, verdicts: dict) -> tuple[list[dict], list[dict], list[dict], list[dict], dict]:
@@ -270,7 +335,7 @@ def main() -> None:
 
 
 async def run_pipeline() -> None:
-    history = seed_history()
+    history = load_history()  # 历史种子仅 --seed 时初始化（阶段三：主流程不再重扫备份文件）
     seen_notes = set(history["note_ids"])
 
     notes, src = load_notes()
@@ -284,13 +349,20 @@ async def run_pipeline() -> None:
 
     kept, reviewed = [], []
     comments_by_note = load_comments()
+    order = {r["note_id"]: i for i, r in enumerate(notes)}
     async with ProbeSession() as ps:
         # Stage B: 仅探测幸存帖作者（缓存优先）；Stage C: 规则判决（台账判女优先级最高）
         author_ids = list({r["user_id"] for r in need_probe if r.get("user_id")})
         cache = await ps.probe(author_ids)
+        apply_probe_counts(history, ps)
+        fail_counts = history["probe_fail_count"]
         for r in need_probe:
             info = cache.get(r.get("user_id"), {})
-            disp, label, basis = judge_note(r, info.get("gender", -1), info.get("ip", ""))
+            g = info.get("gender", -1)
+            if g == -1 and fail_counts.get(r.get("user_id"), 0) >= PROBE_FAIL_DROP_N:
+                disp, label, basis = "drop", "", "主页多次获取失败(滞留保护)"
+            else:
+                disp, label, basis = judge_note(r, g, info.get("ip", ""))
             r["_author_gender"] = label if disp == "keep" else ""
             r["_review_hint"] = f"{label}｜依据:{basis}" if disp == "review" else ""
             r["_drop_reason"] = basis if disp == "drop" else ""
@@ -303,22 +375,31 @@ async def run_pipeline() -> None:
         kept = verdict_keep + kept
         print(f"\n规则过滤: 保留 {len(kept)} 新增 + 待复核 {len(reviewed)} + 历史去重 {len(deduped)} + 剔除 {len(dropped)}")
 
-        # 评论区女生自荐（仅新增帖；评论者去重 + IP 限制；与作者批共用同一浏览器会话）
+        # 阶段二：女生自荐扫描范围 = 全部合规帖（新增+已推+待复核），旧帖新自荐也能扫出；
+        # 已报告过的评论者/人工判男不收录也不再探测（评论者全局只报一次 + 探测预过滤）
+        scan_notes = sorted(kept + deduped + reviewed, key=lambda r: order[r["note_id"]])
+        reported = history["commenters"]
         cand_ids = []
-        for r in kept:
+        for r in scan_notes:
             for c in comments_by_note.get(r["note_id"], []):
-                if is_female_selfintro(c.get("content") or ""):
-                    cand_ids.append(c.get("user_id"))
+                uid = c.get("user_id")
+                if not is_female_selfintro(c.get("content") or ""):
+                    continue
+                if not uid or uid in reported or verdicts.get(uid, {}).get("verdict") == "male":
+                    continue
+                cand_ids.append(uid)
         ccache = await ps.probe(list(set(cand_ids))) if cand_ids else ps.cache
+        apply_probe_counts(history, ps)
     probe_count = len(ps.probed)
-    order = {r["note_id"]: i for i, r in enumerate(notes)}  # 各桶恢复输入顺序，输出与旧版可比
-    kept.sort(key=lambda r: order[r["note_id"]])
+    kept.sort(key=lambda r: order[r["note_id"]])  # 各桶恢复输入顺序，输出与旧版可比
     reviewed.sort(key=lambda r: order[r["note_id"]])
     dropped.sort(key=lambda r: order[r["note_id"]])
     deduped.sort(key=lambda r: order[r["note_id"]])
+    kept_ids = {r["note_id"] for r in kept}
 
     intros = []
-    for r in kept:
+    reported_now = set(reported)  # R2 评论者全局只报一次：历史已报告 + 本轮已收录（历史在循环后才落盘）
+    for r in scan_notes:
         for c in sorted(comments_by_note.get(r["note_id"], []), key=lambda x: x.get("create_time") or 0, reverse=True):
             if not is_female_selfintro(c.get("content") or ""):
                 continue
@@ -332,8 +413,8 @@ async def run_pipeline() -> None:
                 continue  # 男生评论者不收录（评论区不适用自称豁免；人工判女除外）
             if cip and not ip_ok(cip):
                 continue  # R3: 评论者主页 IP 限制
-            if uid in history["commenters"]:
-                continue  # R2: 已报告过的评论者
+            if uid in reported_now:
+                continue  # R2: 已报告过的评论者（含本轮其他帖已收录）
             label = "人工确认女" if cv == "female" else {"1": "女(主页)", "0": "未设置", "-1": "获取失败"}.get(str(cg), "女(文本)")
             intros.append({
                 "所属笔记标题": (r.get("title") or "")[:40],
@@ -347,6 +428,7 @@ async def run_pipeline() -> None:
                 "评论时间": datetime.fromtimestamp((c.get("create_time") or 0) / 1000).strftime("%m-%d %H:%M"),
                 "评论点赞": c.get("like_count", 0),
             })
+            reported_now.add(uid)
 
     # 导出
     cutoff = datetime.now() - timedelta(days=30)
@@ -383,6 +465,7 @@ async def run_pipeline() -> None:
         {"统计项": "历史已推送(去重)", "数量": len(deduped)},
         {"统计项": "新增输出", "数量": len(kept)},
         {"统计项": "女生自荐(新增评论者)", "数量": len(intros)},
+        {"统计项": "自荐来自已推/待复核帖", "数量": sum(1 for x in intros if x["note_id"] not in kept_ids)},
         {"统计项": "历史累计已推送帖子", "数量": len(seen_notes) + len(kept)},
     ])
     run_stamp = datetime.now().strftime("%Y-%m-%d_%H%M")  # 输出按 日期_时分 命名，避免同日覆盖

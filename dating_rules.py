@@ -120,7 +120,9 @@ def judge_note(note_dict: dict, gender: int, home_ip: str) -> tuple[str, str, st
             return "review", "待复核(男号+女性化信号)", "+".join(f_soft)
         return "review", "待复核(男号+内容中性)", "主页性别不可靠，需人工判断"
     if gender == -1:
-        return "drop", "", "主页获取失败"
+        # 阶段三(B)：探测失败不再误杀——待复核，且探测失败不落缓存，下次运行自动重探；
+        # 连续多轮失败的滞留保护（drop）由流程层依据 history["probe_fail_count"] 处理。
+        return "review", "待复核(主页获取失败将重试)", "探测失败不落缓存，下次运行自动重探"
     t = text_gender(text)  # gender == 0 未设置
     if t == "male_text":
         return "drop", "", "男生(文本)"

@@ -187,3 +187,9 @@ database/*.db
 
 # 个人脚本运行时产生的缓存（含真实用户ID，勿提交）
 /gender_cache.json
+
+# 会话目录
+.zcode/
+
+# 黄金标注集（tests/build_golden_draft.py 从本地数据生成，含真实爬取内容，勿提交）
+tests/dating_golden/

@@ -9,6 +9,11 @@
   R2 历史去重：已推送过的帖子（note_id）/已报告过的评论者（user_id）不再重复输出。
   R3 IP 限制武汉：作者主页 ipLocation 与笔记自身 ip_location 均需为 湖北/武汉
      （小红书 IP 属地为省级粒度，武汉落地为湖北）；女生自荐评论者主页 IP 同样限湖北。
+  R4 探测后置（§13 风控整改，2026-10-16）：主页探测只花在幸存帖作者身上——
+     Stage A 免探测预过滤（台账→历史已见→笔记IP，纯本地数据）→ Stage B 缓存优先探测幸存作者
+     → Stage C 规则判决。作者批与评论者批共用一次浏览器会话（ProbeSession）。
+     行为变化：已推送帖不再进入剔除/待复核统计（统一计去重）；双 IP 均不合规的
+     剔除原因显示"笔记IP"（笔记侧先判）。
 
 性别判定数据源：作者主页 userPageData.basicInfo.gender（1=女 2=男 0=未设置，缓存 gender_cache.json）。
 规则本体（正则表 + 纯函数 judge_note 等）在 dating_rules.py，本文件只保留流程编排。
@@ -154,43 +159,102 @@ def load_comments() -> dict[str, list[dict]]:
     return grouped
 
 
-async def probe_genders(user_ids: list[str]) -> dict:
-    cache = load_cache()
-    todo = [u for u in user_ids if u and u not in cache]
-    print(f"性别/IP 缓存: {len(cache)} 已有, {len(todo)} 需探测")
-    if not todo:
-        return cache
-    async with async_playwright() as p:
-        ctx = await p.chromium.launch_persistent_context(
+class ProbeSession:
+    """单次浏览器会话内完成多批主页探测（作者批/评论者批共用一次 launch 与 client）。
+
+    每批内部仍缓存优先（未命中才探测），间隔 5~10s 随机抖动；两批都全命中缓存时
+    不启动浏览器。ps.probed 记录本会话实际探测过的 uid（观测/验收用）。
+    """
+
+    def __init__(self) -> None:
+        self.cache = load_cache()
+        self.probed: list[str] = []
+        self._pw = self._ctx = self._client = None
+
+    async def __aenter__(self) -> "ProbeSession":
+        return self
+
+    async def _launch(self) -> None:
+        self._pw = await async_playwright().start()
+        self._ctx = await self._pw.chromium.launch_persistent_context(
             user_data_dir=os.path.join(os.getcwd(), "browser_data", "xhs_user_data_dir"),
             headless=False, viewport={"width": 1920, "height": 1080}, user_agent=UA)
-        page = await ctx.new_page()
+        page = await self._ctx.new_page()
         await page.goto("https://www.xiaohongshu.com")
         cookie_str, cookie_dict = await mc_utils.convert_browser_context_cookies(
-            ctx, urls=["https://www.xiaohongshu.com"])
-        client = XiaoHongShuClient(
+            self._ctx, urls=["https://www.xiaohongshu.com"])
+        self._client = XiaoHongShuClient(
             headers={"accept": "application/json, text/plain, */*", "user-agent": UA, "Cookie": cookie_str},
             playwright_page=page, cookie_dict=cookie_dict)
+
+    async def probe(self, user_ids: list[str]) -> dict:
+        todo = [u for u in user_ids if u and u not in self.cache]
+        print(f"性别/IP 缓存: {len(self.cache)} 已有, {len(todo)} 需探测")
+        if not todo:
+            return self.cache
+        if self._client is None:  # 首个真实探测批次才启动浏览器
+            await self._launch()
+        self.probed.extend(todo)
         try:
             for i, uid in enumerate(todo, 1):
                 try:
-                    info = await client.get_creator_info(uid)
+                    info = await self._client.get_creator_info(uid)
                     if info and info.get("result", {}).get("success"):
                         b = info.get("basicInfo", {})
-                        cache[uid] = {"gender": int(b.get("gender") or 0), "ip": b.get("ipLocation", ""), "nickname": b.get("nickname", "")}
+                        self.cache[uid] = {"gender": int(b.get("gender") or 0), "ip": b.get("ipLocation", ""), "nickname": b.get("nickname", "")}
                     else:
-                        cache[uid] = {"gender": -1, "ip": "", "nickname": ""}
+                        self.cache[uid] = {"gender": -1, "ip": "", "nickname": ""}
                 except Exception as e:
-                    cache[uid] = {"gender": -1, "ip": "", "nickname": ""}
+                    self.cache[uid] = {"gender": -1, "ip": "", "nickname": ""}
                     print(f"  探测失败 {uid}: {type(e).__name__}")
-                print(f"  [{i}/{len(todo)}] {uid} -> gender={cache[uid]['gender']} ip={cache[uid]['ip'] or '?'}")
+                print(f"  [{i}/{len(todo)}] {uid} -> gender={self.cache[uid]['gender']} ip={self.cache[uid]['ip'] or '?'}")
                 if i % 10 == 0:
-                    save_cache(cache)
+                    save_cache(self.cache)
                 await asyncio.sleep(random.uniform(PROBE_MIN_SEC, PROBE_MAX_SEC))  # 5~10s 随机抖动，去掉等间隔特征
         finally:
-            save_cache(cache)
-            await ctx.close()
-    return cache
+            save_cache(self.cache)
+        return self.cache
+
+    async def __aexit__(self, *exc) -> bool:
+        save_cache(self.cache)
+        if self._ctx is not None:
+            await self._ctx.close()
+        if self._pw is not None:
+            await self._pw.stop()
+        return False
+
+
+def prefilter(notes: list[dict], seen_notes: set, verdicts: dict) -> tuple[list[dict], list[dict], list[dict], list[dict], dict]:
+    """Stage A 免探测预过滤（纯本地数据，零网络）。
+
+    顺序: 台账男→剔除；历史已推送→去重桶(不再判决)；台账女→保留候选(R0 语义：
+    不查 IP、优先一切规则)；笔记属地不合规→剔除；其余进入待判决(需主页探测)。
+    返回 (verdict_keep, need_probe, dropped, deduped, 免探测计数)。
+    """
+    verdict_keep, need_probe, dropped, deduped = [], [], [], []
+    skip = {"verdict": 0, "seen": 0, "note_ip": 0}
+    for r in notes:
+        uid = r.get("user_id")
+        v = verdicts.get(uid, {}).get("verdict")
+        nip = r.get("ip_location") or ""
+        if v == "male":
+            r["_drop_reason"] = "人工复核确认男生"
+            dropped.append(r)
+            skip["verdict"] += 1
+        elif r["note_id"] in seen_notes:
+            deduped.append(r)
+            skip["seen"] += 1
+        elif v == "female":
+            r["_author_gender"] = "人工确认女"
+            verdict_keep.append(r)
+            skip["verdict"] += 1
+        elif nip and not ip_ok(nip):
+            r["_drop_reason"] = f"笔记IP={nip}"
+            dropped.append(r)
+            skip["note_ip"] += 1
+        else:
+            need_probe.append(r)
+    return verdict_keep, need_probe, dropped, deduped, skip
 
 
 def main() -> None:
@@ -202,53 +266,56 @@ def main() -> None:
         nxt = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
         collect_verdicts(None if nxt is None or nxt.startswith("--") else nxt)
         return
+    asyncio.run(run_pipeline())
+
+
+async def run_pipeline() -> None:
     history = seed_history()
     seen_notes = set(history["note_ids"])
 
     notes, src = load_notes()
-    date_str = src.stem.split("_")[-1]
     print(f"笔记来源: {src.name} | 交友关键词唯一笔记: {len(notes)}")
 
-    author_ids = list({r["user_id"] for r in notes if r.get("user_id")})
-    cache = asyncio.run(probe_genders(author_ids))
-
-    kept, reviewed, dropped, deduped = [], [], [], []
-    review_seen = 0  # 待复核但已在历史中的帖子（不再重复提示）
-    # 人工复核台账优先级最高：判女→保留 / 判男→剔除，优先于一切规则
+    # Stage A: 免探测预过滤（R4 探测后置——探测只花在幸存帖作者身上）
     verdicts = load_verdicts()
-    for r in notes:
-        info = cache.get(r.get("user_id"), {})
-        v = verdicts.get(r.get("user_id"), {}).get("verdict")
-        if v == "female":
-            disp, label, basis = "keep", "人工确认女", "人工复核确认女生"
-        elif v == "male":
-            disp, label, basis = "drop", "人工剔除", "人工复核确认男生"
-        else:
+    verdict_keep, need_probe, dropped, deduped, skip = prefilter(notes, seen_notes, verdicts)
+    print(f"预过滤免探测: 台账覆盖 {skip['verdict']} / 历史已见 {skip['seen']} / 笔记IP剔除 {skip['note_ip']}"
+          f" → {len(need_probe)} 帖待判决")
+
+    kept, reviewed = [], []
+    comments_by_note = load_comments()
+    async with ProbeSession() as ps:
+        # Stage B: 仅探测幸存帖作者（缓存优先）；Stage C: 规则判决（台账判女优先级最高）
+        author_ids = list({r["user_id"] for r in need_probe if r.get("user_id")})
+        cache = await ps.probe(author_ids)
+        for r in need_probe:
+            info = cache.get(r.get("user_id"), {})
             disp, label, basis = judge_note(r, info.get("gender", -1), info.get("ip", ""))
-        r["_author_gender"] = label if disp == "keep" else ""
-        r["_review_hint"] = f"{label}｜依据:{basis}" if disp == "review" else ""
-        r["_drop_reason"] = basis if disp == "drop" else ""
-        if disp == "drop":
-            dropped.append(r)
-        elif disp == "review":
-            if r["note_id"] not in seen_notes:
+            r["_author_gender"] = label if disp == "keep" else ""
+            r["_review_hint"] = f"{label}｜依据:{basis}" if disp == "review" else ""
+            r["_drop_reason"] = basis if disp == "drop" else ""
+            if disp == "drop":
+                dropped.append(r)
+            elif disp == "review":
                 reviewed.append(r)  # 待复核不进历史，未处理会在下次运行再次出现
             else:
-                review_seen += 1
-        elif r["note_id"] in seen_notes:
-            deduped.append(r)
-        else:
-            kept.append(r)
-    print(f"\n规则过滤: 保留 {len(kept)} 新增 + 待复核 {len(reviewed)} + 历史去重 {len(deduped)} + 剔除 {len(dropped)}")
+                kept.append(r)
+        kept = verdict_keep + kept
+        print(f"\n规则过滤: 保留 {len(kept)} 新增 + 待复核 {len(reviewed)} + 历史去重 {len(deduped)} + 剔除 {len(dropped)}")
 
-    # 评论区女生自荐（仅新增帖；评论者去重 + IP 限制）
-    comments_by_note = load_comments()
-    cand_ids = []
-    for r in kept:
-        for c in comments_by_note.get(r["note_id"], []):
-            if is_female_selfintro(c.get("content") or ""):
-                cand_ids.append(c.get("user_id"))
-    ccache = asyncio.run(probe_genders(list(set(cand_ids)))) if cand_ids else {}
+        # 评论区女生自荐（仅新增帖；评论者去重 + IP 限制；与作者批共用同一浏览器会话）
+        cand_ids = []
+        for r in kept:
+            for c in comments_by_note.get(r["note_id"], []):
+                if is_female_selfintro(c.get("content") or ""):
+                    cand_ids.append(c.get("user_id"))
+        ccache = await ps.probe(list(set(cand_ids))) if cand_ids else ps.cache
+    probe_count = len(ps.probed)
+    order = {r["note_id"]: i for i, r in enumerate(notes)}  # 各桶恢复输入顺序，输出与旧版可比
+    kept.sort(key=lambda r: order[r["note_id"]])
+    reviewed.sort(key=lambda r: order[r["note_id"]])
+    dropped.sort(key=lambda r: order[r["note_id"]])
+    deduped.sort(key=lambda r: order[r["note_id"]])
 
     intros = []
     for r in kept:
@@ -309,9 +376,10 @@ def main() -> None:
     } for r in dropped]
     stats = pd.DataFrame([
         {"统计项": "输入笔记", "数量": len(notes)},
-        {"统计项": "剔除(性别/IP)", "数量": len(dropped)},
+        {"统计项": "预过滤免探测(台账/历史/笔记IP)", "数量": skip["verdict"] + skip["seen"] + skip["note_ip"]},
+        {"统计项": "本次主页探测", "数量": probe_count},
+        {"统计项": "剔除(verdict/IP/性别规则)", "数量": len(dropped)},
         {"统计项": "待复核(男号中性/软信号)", "数量": len(reviewed)},
-        {"统计项": "待复核但历史已见(不重复提示)", "数量": review_seen},
         {"统计项": "历史已推送(去重)", "数量": len(deduped)},
         {"统计项": "新增输出", "数量": len(kept)},
         {"统计项": "女生自荐(新增评论者)", "数量": len(intros)},

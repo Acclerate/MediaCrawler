@@ -68,6 +68,14 @@ def test_edge_cases():
     # R1 自称女生豁免（男号）
     assert j(n("女找男 96年"), 2, "湖北")[0:2] == ("keep", "男号自称女")
     assert j(n("本人女 坐标武汉"), 2, "湖北")[0:2] == ("keep", "男号自称女")
+    # 2026-10-20 定稿扩充：职业自称 / 数字+空格+女
+    assert j(n("【武汉相亲】", "95年高校女教师，期待遇见同频的你"), 2, "湖北")[0:2] == ("keep", "男号自称女")
+    assert j(n("武汉 96 女"), 2, "湖北")[0:2] == ("keep", "男号自称女")
+    assert j(n("本人96年女，想认识"), 2, "湖北")[0:2] == ("keep", "男号自称女")
+    # 择偶目标里的"女教师/96女"不构成自称（负向后顾护栏）
+    assert dating_rules.self_claims_female("想找个女教师做女朋友") is False
+    assert dating_rules.self_claims_female("蹲一个96女的") is False
+    assert dating_rules.self_claims_female("找个95年女，") is False
     # "找女生"不构成豁免
     assert j(n("想找个女生一起喝下午茶"), 2, "湖北")[0] == "drop"
     assert j(n("男找女 本人90年"), 2, "湖北")[0] == "drop"

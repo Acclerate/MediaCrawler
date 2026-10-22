@@ -101,6 +101,14 @@ START_PAGE = 1
 # Control the number of crawled videos/posts
 CRAWLER_MAX_NOTES_COUNT = 10  # §13 降密恢复：每词 20→10（2026-10-16）
 
+# 时间范围过滤（通用，按天）：只保留发布时间在近 N 天内的作品。0 = 不过滤。
+# 例：30 = 近一个月，90 = 近三个月，可填任意天数（可扩展）。
+# 当前在 douyin search 模式生效：开启后自动切换"最新发布"排序，先用平台原生
+# 档位预过滤（见 media_platform/douyin/help.py:native_publish_time_bracket），
+# 再按 create_time 本地精确过滤，整页越界时提前终止翻页。
+# 注意：开启后优先级高于 PUBLISH_TIME_TYPE（原生档位由 N 天自动推导）。
+CRAWLER_RECENT_DAYS = 30
+
 # Controlling the number of concurrent crawlers
 MAX_CONCURRENCY_NUM = 1
 

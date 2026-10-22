@@ -26,6 +26,7 @@
 
 import random
 import re
+import time
 from typing import Optional
 
 import execjs
@@ -34,7 +35,35 @@ from playwright.async_api import Page
 from model.m_douyin import VideoUrlInfo, CreatorUrlInfo
 from tools.crawler_util import extract_url_params_to_dict
 
+from .field import PublishTimeType
+
 douyin_sign_obj = execjs.compile(open("libs/douyin.js", encoding="utf-8-sig").read())
+
+
+def native_publish_time_bracket(recent_days: int) -> PublishTimeType:
+    """把"近 N 天"映射到抖音搜索接口原生支持的最小覆盖档位。
+
+    抖音原生只有 一天(1)/一周(7)/半年(180) 三档，没有近一月/近三月；
+    档位必须完全覆盖所需范围（宁多勿少，否则会漏数据），精确过滤交给
+    本地 create_time 过滤完成。超过半年只能不设档（UNLIMITED）防漏。
+    """
+    if recent_days <= 0:
+        return PublishTimeType.UNLIMITED
+    if recent_days <= 1:
+        return PublishTimeType.ONE_DAY
+    if recent_days <= 7:
+        return PublishTimeType.ONE_WEEK
+    if recent_days <= 180:
+        return PublishTimeType.SIX_MONTH
+    return PublishTimeType.UNLIMITED
+
+
+def time_range_cutoff_ts(recent_days: int, now: Optional[float] = None) -> int:
+    """近 N 天窗口的最早发布时间戳（unix 秒）；recent_days<=0 返回 0 表示不过滤。"""
+    if recent_days <= 0:
+        return 0
+    now = time.time() if now is None else now
+    return int(now - recent_days * 86400)
 
 
 def get_web_id():

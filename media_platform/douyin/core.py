@@ -43,11 +43,13 @@ from var import crawler_type_var, source_keyword_var
 from . import media as douyin_media
 from .client import DouYinClient
 from .exception import DataFetchError
-from .field import PublishTimeType
+from .field import PublishTimeType, SearchSortType
 from .help import (
     parse_video_info_from_url,
     parse_creator_info_from_url,
     parse_aweme_info_from_search_item,
+    native_publish_time_bracket,
+    time_range_cutoff_ts,
 )
 from .login import DouYinLogin
 
@@ -141,6 +143,15 @@ class DouYinCrawler(AbstractCrawler):
         if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
         start_page = config.START_PAGE  # start page number
+        # 时间范围过滤（CRAWLER_RECENT_DAYS>0 时生效）：
+        # 1) 排序切到"最新发布"，保证结果按时间倒序，越界即无后续
+        # 2) 原生档位只做预过滤（取最小覆盖档），2) create_time 本地精确过滤
+        recent_days = config.CRAWLER_RECENT_DAYS
+        cutoff_ts = time_range_cutoff_ts(recent_days)
+        if recent_days > 0:
+            utils.logger.info(
+                f"[DouYinCrawler.search] 时间范围过滤已开启：近 {recent_days} 天，排序=最新发布"
+            )
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
@@ -161,7 +172,16 @@ class DouYinCrawler(AbstractCrawler):
                     posts_res = await self.dy_client.search_info_by_keyword(
                         keyword=keyword,
                         offset=page * dy_limit_count - dy_limit_count,
-                        publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
+                        publish_time=(
+                            native_publish_time_bracket(recent_days)
+                            if recent_days > 0
+                            else PublishTimeType(config.PUBLISH_TIME_TYPE)
+                        ),
+                        sort_type=(
+                            SearchSortType.LATEST
+                            if recent_days > 0
+                            else SearchSortType.GENERAL
+                        ),
                         search_id=dy_search_id,
                     )
                     if posts_res.get("data") is None or posts_res.get("data") == []:
@@ -189,10 +209,21 @@ class DouYinCrawler(AbstractCrawler):
                     )
                     if aweme_info is None:
                         continue
+                    if cutoff_ts and int(aweme_info.get("create_time") or 0) < cutoff_ts:
+                        # 发布时间早于近 N 天窗口：不落库、不抓评论
+                        continue
                     aweme_list.append(aweme_info.get("aweme_id", ""))
                     page_aweme_list.append(aweme_info.get("aweme_id", ""))
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
                     await self.download_media(aweme_item=aweme_info)
+
+                # 最新排序下结果按时间倒序，整页均越界说明后续只会更老，提前结束
+                if cutoff_ts and not page_aweme_list:
+                    utils.logger.info(
+                        f"[DouYinCrawler.search] keyword:{keyword}, page:{page - 1} "
+                        f"整页均早于近 {recent_days} 天窗口，提前结束该关键词"
+                    )
+                    break
 
                 # Batch get note comments for the current page
                 await self.batch_get_note_comments(page_aweme_list)

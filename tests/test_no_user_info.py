@@ -297,9 +297,9 @@ def test_bilibili_video_dict_masks_user_info():
 # ----------------------------- 仓库 grep 断言 -----------------------------
 
 # store/ 下的扫描范围：仅 .py 源码，排除 __pycache__。
-# 例外：store/xhs 在本分支有意保留原始 user_id/IP 等（个人交友研究，勿对外传播），
-# 不纳入扫描。
-_SCAN_EXCLUDED_DIRS = {"__pycache__", "xhs"}
+# 例外：store/xhs 与 store/douyin 在本分支有意保留原始 user_id/IP 等（个人研究，
+# 勿对外传播，政策回归见 tests/test_douyin_no_user_info.py），不纳入扫描。
+_SCAN_EXCLUDED_DIRS = {"__pycache__", "xhs", "douyin"}
 
 
 def _iter_store_py_files():

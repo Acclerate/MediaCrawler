@@ -40,6 +40,17 @@ from var import crawler_type_var
 from database.mongodb_store_base import MongoDBStoreBase
 
 
+def _filter_orm_fields(item: Dict, model) -> Dict:
+    """只保留 ORM 表里实际存在的列。
+
+    本分支在 store/douyin/__init__.py 保留了原始 user_id/author_homepage/ip_location
+    等研究字段（jsonl/csv 等文件后端整包透传），但 ORM 表没有这些列，
+    直接 DouyinAweme(**content_item) 会 TypeError，按表列过滤后再构造。
+    """
+    valid = {c.name for c in model.__table__.columns}
+    return {k: v for k, v in item.items() if k in valid}
+
+
 class DouyinCsvStoreImplement(AbstractStore):
     def __init__(self):
         self.file_writer = AsyncFileWriter(
@@ -98,6 +109,7 @@ class DouyinDbStoreImplement(AbstractStore):
             content_item: content item dict
         """
         aweme_id = content_item.get("aweme_id")
+        content_item = _filter_orm_fields(content_item, DouyinAweme)
         async with get_session() as session:
             result = await session.execute(select(DouyinAweme).where(DouyinAweme.aweme_id == aweme_id))
             aweme_detail = result.scalar_one_or_none()
@@ -119,6 +131,7 @@ class DouyinDbStoreImplement(AbstractStore):
             comment_item: comment item dict
         """
         comment_id = comment_item.get("comment_id")
+        comment_item = _filter_orm_fields(comment_item, DouyinAwemeComment)
         async with get_session() as session:
             result = await session.execute(select(DouyinAwemeComment).where(DouyinAwemeComment.comment_id == comment_id))
             comment_detail = result.scalar_one_or_none()

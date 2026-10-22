@@ -21,14 +21,86 @@
 # @Author  : relakkes@gmail.com
 # @Time    : 2024/1/14 18:46
 # @Desc    :
-from typing import List
+import json
+from pathlib import Path
+from typing import List, Optional
 
 import config
 from media_platform.douyin.media import extract_cover_url, extract_image_urls, extract_video_urls
 from var import source_keyword_var
-from tools.user_hash import anonymize_user_id, mask_nickname
+from tools.user_hash import anonymize_user_id
 
 from ._store_impl import *
+
+# ----------------------------- 文件后端跨运行去重 -----------------------------
+# 语义：
+# - 作品键 = (aweme_id, source_keyword)。同一作品命中不同关键词不算重复
+#   （source_keyword 是研究信号，保留两行）；同关键词重复运行才算重复，跳过。
+# - 评论键 = comment_id（评论行本身不带关键词，纯重复行无信息量）。
+# - 种子在首次写入前懒加载 data/douyin/jsonl/ 下已有 contents/comments 文件，
+#   之后随写入增量维护；仅文件后端（jsonl/json/csv/excel）生效。
+# - db/sqlite/postgres/mongodb 保持原生 upsert 语义（重爬可刷新互动数），不去重。
+
+_FILE_BACKENDS = {"jsonl", "json", "csv", "excel"}
+_seen_keys: Optional[set] = None
+
+
+def _content_key(aweme_id, source_keyword) -> str:
+    return f"c:{aweme_id}:{source_keyword}"
+
+
+def _comment_key(comment_id) -> str:
+    return f"m:{comment_id}"
+
+
+def _load_seen_keys(base: Path = Path("data/douyin/jsonl")) -> set:
+    """扫描历史 jsonl 文件装载去重种子。坏行跳过，不中断。"""
+    seen = set()
+    if not base.exists():
+        return seen
+    for path in sorted(base.glob("*.jsonl")):
+        is_comment_file = "comment" in path.name
+        is_content_file = "content" in path.name
+        if not (is_comment_file or is_content_file):
+            continue
+        try:
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if is_comment_file:
+                        if row.get("comment_id"):
+                            seen.add(_comment_key(row["comment_id"]))
+                    elif row.get("aweme_id"):
+                        seen.add(_content_key(row["aweme_id"], row.get("source_keyword") or ""))
+        except OSError:
+            continue
+    utils.logger.info(f"[store.douyin.dedup] 历史去重种子加载完成：{len(seen)} 个键（来自 {base}）")
+    return seen
+
+
+def _is_duplicate_and_mark(key: str) -> bool:
+    """文件后端下检查并登记；重复返回 True。种子懒加载只在首次调用发生。"""
+    global _seen_keys
+    if config.SAVE_DATA_OPTION not in _FILE_BACKENDS:
+        return False
+    if _seen_keys is None:
+        _seen_keys = _load_seen_keys()
+    if key in _seen_keys:
+        return True
+    _seen_keys.add(key)
+    return False
+
+
+def reset_dedup_cache() -> None:
+    """测试用：清空进程内去重缓存，下次写入重新播种。"""
+    global _seen_keys
+    _seen_keys = None
 
 
 class DouyinStoreFactory:
@@ -93,6 +165,12 @@ def _extract_music_download_url(aweme_detail: Dict) -> str:
 
 async def update_douyin_aweme(aweme_item: Dict):
     aweme_id = aweme_item.get("aweme_id")
+    source_keyword = source_keyword_var.get()
+    if _is_duplicate_and_mark(_content_key(aweme_id, source_keyword)):
+        utils.logger.info(
+            f"[store.douyin.dedup] 跳过重复作品: aweme_id:{aweme_id}, keyword:{source_keyword}"
+        )
+        return
     user_info = aweme_item.get("author", {})
     interact_info = aweme_item.get("statistics", {})
     save_content_item = {
@@ -101,8 +179,11 @@ async def update_douyin_aweme(aweme_item: Dict):
         "title": aweme_item.get("desc", ""),
         "desc": aweme_item.get("desc", ""),
         "create_time": aweme_item.get("create_time"),
-        "creator_hash": anonymize_user_id(user_info.get("uid")),  # 创作者匿名哈希(不存原始 uid)
-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
+        "creator_hash": anonymize_user_id(user_info.get("uid")),  # 创作者匿名哈希
+        "user_id": user_info.get("uid"),  # 创作者原始 uid（本地研究用，勿对外传播）
+        "author_homepage": f"https://www.douyin.com/user/{user_info.get('sec_uid')}",  # 号主主页链接
+        "nickname": user_info.get("nickname"),  # 用户昵称（原始，未脱敏）
+        "ip_location": aweme_item.get("ip_label", ""),  # 作品发布 IP 属地（无则为空）
         "liked_count": str(interact_info.get("digg_count")),
         "collected_count": str(interact_info.get("collect_count")),
         "comment_count": str(interact_info.get("comment_count")),
@@ -113,7 +194,7 @@ async def update_douyin_aweme(aweme_item: Dict):
         "video_download_url": (extract_video_urls(aweme_item) or [""])[0],
         "music_download_url": _extract_music_download_url(aweme_item),
         "note_download_url": ",".join(extract_image_urls(aweme_item)),
-        "source_keyword": source_keyword_var.get(),
+        "source_keyword": source_keyword,
     }
     utils.logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_id}, title:{save_content_item.get('title')}")
     await DouyinStoreFactory.create_store().store_content(content_item=save_content_item)
@@ -131,16 +212,21 @@ async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
     if aweme_id != comment_aweme_id:
         utils.logger.error(f"[store.douyin.update_dy_aweme_comment] comment_aweme_id: {comment_aweme_id} != aweme_id: {aweme_id}")
         return
-    user_info = comment_item.get("user", {})
     comment_id = comment_item.get("cid")
+    if _is_duplicate_and_mark(_comment_key(comment_id)):
+        return
+    user_info = comment_item.get("user", {})
     parent_comment_id = comment_item.get("reply_id", "0")
     save_comment_item = {
         "comment_id": comment_id,
         "create_time": comment_item.get("create_time"),
         "aweme_id": aweme_id,
         "content": comment_item.get("text"),
-        "creator_hash": anonymize_user_id(user_info.get("uid")),  # 创作者匿名哈希(不存原始 uid)
-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
+        "creator_hash": anonymize_user_id(user_info.get("uid")),  # 评论者匿名哈希
+        "user_id": user_info.get("uid"),  # 评论者原始 uid（本地研究用，勿对外传播）
+        "author_homepage": f"https://www.douyin.com/user/{user_info.get('sec_uid')}",  # 评论者主页链接
+        "nickname": user_info.get("nickname"),  # 用户昵称（原始，未脱敏）
+        "ip_location": comment_item.get("ip_label", ""),  # 评论发布 IP 属地（无则为空）
         "sub_comment_count": str(comment_item.get("reply_comment_total", 0)),
         "like_count": (comment_item.get("digg_count") if comment_item.get("digg_count") else 0),
         "last_modify_ts": utils.get_current_timestamp(),

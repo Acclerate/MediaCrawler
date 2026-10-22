@@ -111,15 +111,34 @@ class DouYinLogin(AbstractLogin):
     async def popup_login_dialog(self):
         """If the login dialog box does not pop up automatically, we will manually click the login button"""
         dialog_selector = "xpath=//div[@id='login-panel-new']"
+        # 2026-10 改版：未登录访问首页会直接渲染全屏登录面板（id 形如 login-full-panel-xxx），
+        # 面板内部仍包含 #login-panel-new 与二维码；冷启动时首帧渲染可能超过 10s
+        full_panel_selector = "xpath=//div[starts-with(@id, 'login-full-panel')]"
         try:
-            # check dialog box is auto popup and wait for 10 seconds
-            await self.context_page.wait_for_selector(dialog_selector, timeout=1000 * 10)
+            # check dialog box is auto popup and wait for 15 seconds
+            await self.context_page.wait_for_selector(dialog_selector, timeout=1000 * 15)
+            return
         except Exception as e:
             utils.logger.error(f"[DouYinLogin.popup_login_dialog] login dialog box does not pop up automatically, error: {e}")
-            utils.logger.info("[DouYinLogin.popup_login_dialog] login dialog box does not pop up automatically, we will manually click the login button")
-            login_button_ele = self.context_page.locator("xpath=//p[text() = '登录']")
-            await login_button_ele.click()
-            await asyncio.sleep(0.5)
+
+        try:
+            # full-screen login panel variant, wait for 10 seconds
+            await self.context_page.wait_for_selector(full_panel_selector, timeout=1000 * 10)
+            return
+        except Exception:
+            pass
+
+        utils.logger.info("[DouYinLogin.popup_login_dialog] login panel not found, we will manually click the login button")
+        login_button_ele = self.context_page.locator("xpath=//p[text() = '登录']")
+        try:
+            await login_button_ele.click(timeout=1000 * 10)
+        except Exception as e:
+            # 点击被全屏面板遮挡，说明登录面板其实已经打开，无需再点击
+            if await self.context_page.query_selector(full_panel_selector) or await self.context_page.query_selector(dialog_selector):
+                utils.logger.info("[DouYinLogin.popup_login_dialog] login panel already open (click intercepted), continue")
+                return
+            raise
+        await asyncio.sleep(0.5)
 
     async def login_by_qrcode(self):
         utils.logger.info("[DouYinLogin.login_by_qrcode] Begin login douyin by qrcode...")
